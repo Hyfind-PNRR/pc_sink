@@ -1,0 +1,14 @@
+[package]
+name    = "hyfind-core"
+version = "0.1.0"
+edition = "2021"
+description = "HyfindTag Gateway — pure core types and domain logic (no I/O)"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

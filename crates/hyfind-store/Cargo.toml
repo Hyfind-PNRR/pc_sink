@@ -1,0 +1,12 @@
+[package]
+name    = "hyfind-store"
+version = "0.1.0"
+edition = "2021"
+description = "HyfindTag Gateway — SQLite persistence layer"
+
+[dependencies]
+thiserror = { workspace = true }
+rusqlite  = { workspace = true }
+
+[lints]
+workspace = true

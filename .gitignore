@@ -1,1 +1,20 @@
+# Rust build artifacts
 /target
+/src-tauri/target
+
+# Tauri generated files
+/src-tauri/gen/
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.iml

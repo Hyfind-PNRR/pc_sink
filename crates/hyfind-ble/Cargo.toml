@@ -1,0 +1,15 @@
+[package]
+name    = "hyfind-ble"
+version = "0.1.0"
+edition = "2021"
+description = "HyfindTag Gateway — btleplug BLE-central driver"
+
+[dependencies]
+hyfind-core = { workspace = true }
+btleplug    = { workspace = true }
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[lints]
+workspace = true
