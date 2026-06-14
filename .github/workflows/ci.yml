@@ -1,0 +1,52 @@
+name: CI
+
+# Independent verification: runs on every push and pull request, regardless of @claude.
+# This catches anything an agent (or a human) misses, and gives the @claude job real CI
+# logs to read on PRs (it has `actions: read`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: fmt + check + build + clippy + test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # The five gates, in the cheap-to-expensive order so the fastest failures surface first.
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Type check
+        run: cargo check --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace

@@ -30,22 +30,32 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Rust toolchain so the agent can actually build/lint/format/test its own work.
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Cache target/ and the registry to keep cold builds inside the turn budget.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
-          # This is an optional setting that allows Claude to read CI results on PRs
+          # Allows Claude to read CI results on PRs (e.g. the `ci` job below).
           additional_permissions: |
             actions: read
 
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
-          # prompt: 'Update the pull request description to include a summary of changes.'
-
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          # claude_args:
+          # - allowedTools: gh + file edits + every cargo verb the issues require + ripgrep
+          #   (rg is used for the "first action" anchor and for grep-verifiable acceptance criteria).
+          # - max-turns: Rust's edit-compile-borrowck cycle burns turns; 40 for moderate refactors.
+          # - model: Opus for non-trivial trait/ownership/API design (Actions defaults to Sonnet).
           claude_args: |
-            --allowed-tools Bash(gh *), Write, Edit, MultiEdit, Bash(cargo *)
-
+            --model claude-opus-4-8
+            --max-turns 40
+            --allowedTools "Bash(gh *),Write,Edit,MultiEdit,Bash(cargo build *),Bash(cargo test *),Bash(cargo clippy *),Bash(cargo fmt *),Bash(cargo check *),Bash(rg *)"
