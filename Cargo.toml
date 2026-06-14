@@ -13,3 +13,28 @@ thiserror = "=2.0.18"
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 # Human-readable CSV export of decoded samples (Issue 3 scope).
 csv = "=1.3.1"
+# Cross-platform BLE central (scan/connect/subscribe-indicate/write) — the BLE
+# acquisition loop (Issue 4). Native only; no wasm target (CLAUDE.md A.8).
+btleplug = "=0.11.5"
+# Async runtime for the acquisition loop. Features kept minimal: multi-thread
+# scheduler + macros for `#[tokio::main]`, `signal` for Ctrl-C shutdown, `sync`
+# for the shared store mutex/semaphore, `time` for the drain idle timeout.
+tokio = { version = "=1.43.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "time",
+] }
+# `CancellationToken` for a clean, clone-able shutdown signal into the loop.
+tokio-util = "=0.7.13"
+# `StreamExt::next` over btleplug's event and notification streams.
+futures = "=0.3.31"
+# `Uuid` for the GATT characteristic/service constants (btleplug uses `uuid`).
+uuid = "=1.11.0"
+# Application-level error handling in `main` (CLAUDE.md: anyhow at the binary).
+anyhow = "=1.0.95"
+# Logging facade so a per-tag failure is recorded without crashing the loop.
+log = "=0.4.22"
+# Concrete logger for the binary; reads `RUST_LOG` at startup.
+env_logger = "=0.11.6"

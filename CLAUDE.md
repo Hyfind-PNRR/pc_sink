@@ -81,6 +81,13 @@ Critical quirks:
 - Link negotiates PHY 2M / DLE 251 / MTU 247 right after connect; tolerate that brief
   window before indications begin.
 
+> **btleplug note (Issue 4):** btleplug surfaces *both* notify and indicate values through
+> the single `Peripheral::notifications()` stream — calling `subscribe()` on a characteristic
+> whose properties include INDICATE enables indications, so there is no separate "indicate"
+> API. The acquisition loop therefore detects "tag drained" by either the stream ending
+> (tag disconnected) **or** a configurable idle gap with no further packet
+> (`AcquireConfig::drain_idle_timeout`), since the tag gives no explicit end-of-batch marker.
+
 ## A.4 Uplink packet — `BlePacket` (100 bytes, packed, little-endian)
 
 Firmware `ble_packet` (`models.h`). Canonical Python cross-check:
@@ -213,6 +220,14 @@ I/O at the edges:
 The reference Python central (`hyfind_gateway_emulator.py`, in the firmware project)
 documents the scan/connect/drain flow and the canonical packet `struct` — consult it for
 protocol behavior, not for Rust structure.
+
+**Implemented so far:** `models`, `command`, `store`, and `ble` exist. The `ble` module
+(Issue 4) holds the acquisition loop on `btleplug` + `tokio`; its pure decode→insert seam
+is `ble::decode_and_store(&SessionStore, &TagId, &[u8])`, which the live loop calls per
+indicated packet and tests drive without any BLE transport. Dependencies added for it:
+`btleplug` (BLE central), `tokio` (runtime), `tokio-util` (`CancellationToken` shutdown),
+`futures` (`StreamExt`), `uuid`, `anyhow` (binary errors), `log`/`env_logger` (so a
+per-tag failure is logged, not fatal).
 
 ---
 
