@@ -13,3 +13,33 @@ thiserror = "=2.0.18"
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 # Human-readable CSV export of decoded samples (Issue 3 scope).
 csv = "=1.3.1"
+# Async runtime for the BLE acquisition loop (Issue 4). `sync` for the shared
+# store mutex + concurrency semaphore, `time` for the drain idle-timeout,
+# `signal` for Ctrl-C shutdown in `main`, `macros`/`rt-multi-thread` for the loop.
+tokio = { version = "=1.40.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "signal",
+] }
+# Cross-platform BLE central: scan/connect/subscribe/write over CoreBluetooth,
+# BlueZ and WinRT. The acquisition loop's transport (Issue 4).
+btleplug = "=0.11.5"
+# `StreamExt` for consuming btleplug's adapter-event and indication streams.
+futures = "=0.3.30"
+# Naming the GATT service/characteristic UUIDs as compile-time constants;
+# version unified with btleplug's own `uuid` dependency (^1).
+uuid = "=1.10.0"
+# Logging facade: per-tag/per-packet errors are logged, not fatal (Issue 4).
+log = "=0.4.22"
+# Concrete logger for the `pc_sink` binary so acquisition logs are visible.
+env_logger = "=0.11.5"
+# Application-level error handling in `main` (CLAUDE.md: anyhow for the binary).
+anyhow = "=1.0.86"
+
+# btleplug's BlueZ backend links libdbus on Linux. Build it from vendored source
+# so pc_sink compiles on CI/dev hosts that lack the system `libdbus-1-dev`
+# package; pinned to the version btleplug's dependency graph resolves.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "=0.2.7", features = ["vendored"] }

@@ -214,6 +214,33 @@ The reference Python central (`hyfind_gateway_emulator.py`, in the firmware proj
 documents the scan/connect/drain flow and the canonical packet `struct` — consult it for
 protocol behavior, not for Rust structure.
 
+## A.10 Implementation notes (built in Issue 4 — keep current)
+
+The acquisition loop now exists. Realities discovered while implementing it:
+
+- **Module is `acquire`, not `ble`.** `acquire::run_acquisition(config, store, shutdown)`
+  runs the scan → connect → time-sync → drain → disconnect loop; the per-packet
+  `decode → insert` step is the private `decode_and_store` seam (pure-ish, no BLE/clock),
+  which is what the hardware-free tests exercise. UUIDs, `DEFAULT_NAME_PREFIX`, and
+  `DEFAULT_MAX_CONCURRENT_CONNECTIONS` are named constants there.
+- **Stack:** `btleplug` (cross-platform central) + `tokio`. `btleplug::Peripheral::subscribe`
+  auto-selects indicate vs notify from the characteristic's `CharPropFlags`; we additionally
+  assert `INDICATE` is present and error otherwise, so a notify-only DATA char is rejected
+  rather than silently mis-subscribed.
+- **Linux build needs D-Bus.** btleplug's BlueZ backend links `libdbus`. Hosts without the
+  system `libdbus-1-dev` package (including the stock `ubuntu-latest` GitHub runner) fail to
+  build unless `libdbus-sys` is built from vendored source. pc_sink therefore pins
+  `libdbus-sys = { features = ["vendored"] }` as a `cfg(target_os = "linux")` dependency, so
+  `cargo build` works with no system package. Do not remove this without first installing
+  `libdbus-1-dev` in CI.
+- **Tag identity** is `TagId(peripheral.address())` with the advertised name as the label.
+  Caveat: on macOS/CoreBluetooth the BLE address is not exposed (btleplug surfaces a system
+  UUID via `PeripheralId` instead), so the address-as-id scheme is solid on Linux/Windows but
+  will need a `PeripheralId`-based fallback if/when macOS support matters.
+- **Concurrency** is bounded by a `tokio::Semaphore` of `max_concurrent` permits; each tag is
+  serviced on its own task, and an in-progress set prevents a still-advertising tag from being
+  double-serviced. A drain ends on tag disconnect or a `DRAIN_IDLE_TIMEOUT` of silence.
+
 ---
 
 # PART B — Engineering Conventions
