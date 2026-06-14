@@ -46,5 +46,5 @@ jobs:
 
           claude_args: |
             --model claude-opus-4-8
-            --max-turns 40
+            --max-turns 100
             --allowedTools "Bash(gh *),Bash(git *),Write,Edit,MultiEdit,Bash(cargo build *),Bash(cargo test *),Bash(cargo clippy *),Bash(cargo fmt *),Bash(cargo check *),Bash(rg *)"
