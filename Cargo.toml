@@ -8,3 +8,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 # Ergonomic, zero-cost derive for the library `DecodeError` enum (CLAUDE.md: use
 # thiserror for library errors).
 thiserror = "=2.0.18"
+# Local session storage. `bundled` compiles SQLite from source so CI needs no
+# system libsqlite3 and the version is reproducible (CLAUDE.md A.7).
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+# Human-readable CSV export of decoded samples (Issue 3 scope).
+csv = "=1.3.1"
