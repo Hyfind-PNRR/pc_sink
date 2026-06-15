@@ -1,3 +1,6 @@
+#![warn(clippy::all, rust_2018_idioms)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] 
+// hide console window on Windows in release
 //! pc_sink binary: runs the BLE acquisition loop until Ctrl-C.
 //!
 //! Opens a per-session SQLite store, then drives
@@ -18,6 +21,9 @@ use pc_sink::store::SessionStore;
 /// Default session database file created in the working directory.
 const SESSION_DB_PATH: &str = "pc_sink_session.sqlite";
 
+mod app;
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -57,6 +63,26 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 300.0])
+            .with_min_inner_size([300.0, 220.0])
+            .with_icon(
+                // NOTE: Adding an icon is optional
+                eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+                    .expect("Failed to load icon"),
+            ),
+        ..Default::default()
+    };
+
+    let r = eframe::run_native(
+        "Pc_sink",
+        native_options,
+        Box::new(|_| Ok(Box::new(app::App::default()))),
+    );
+    if r.is_err() {
+        println!("{:?}", r);
+    }
     run_acquisition(AcquireConfig::default(), store, cancel, drain_events)
         .await
         .context("running BLE acquisition loop")?;
