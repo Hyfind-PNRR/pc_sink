@@ -1,17 +1,17 @@
 #![warn(clippy::all, rust_2018_idioms)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // hide console window on Windows in release
-//! pc_sink binary: runs the BLE acquisition loop until Ctrl-C.
+//! `pc_sink` binary: runs the BLE acquisition loop until Ctrl-C.
 //!
-//! Opens a per-session SQLite store, then drives
-//! [`pc_sink::ble::run_acquisition`], which scans for HyfindTags, time-syncs and
+//! Opens a per-session `SQLite` store, then drives
+//! [`pc_sink::ble::run_acquisition`], which scans for `HyfindTags`, time-syncs and
 //! drains each one, and persists decoded samples keyed by tag id. A `Ctrl-C`
 //! triggers a clean shutdown via a [`CancellationToken`].
 
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -40,8 +40,8 @@ fn main() -> anyhow::Result<()> {
 
     // Subscribe BEFORE the loop starts so no drain is missed.
     let drain_events = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
-    let ui_events = drain_events.subscribe();   // handed to the App
-    let log_events = drain_events.subscribe();  // background logger
+    let ui_events = drain_events.subscribe(); // handed to the App
+    let log_events = drain_events.subscribe(); // background logger
 
     // Ctrl-C task.
     {
@@ -61,7 +61,8 @@ fn main() -> anyhow::Result<()> {
             match events.recv().await {
                 Ok(event) => log::debug!(
                     "drained tag {}: {} samples",
-                    event.tag_id, event.samples_stored
+                    event.tag_id,
+                    event.samples_stored
                 ),
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!("drain-event subscriber lagged; skipped {skipped} events");
@@ -96,7 +97,9 @@ fn main() -> anyhow::Result<()> {
 
     // Window closed → tell acquisition to stop, then wait for it to finish.
     cancel.cancel();
-    runtime.block_on(acq_handle).context("joining acquisition task")?
+    runtime
+        .block_on(acq_handle)
+        .context("joining acquisition task")?
         .context("running BLE acquisition loop")?;
 
     gui_result.map_err(|e| anyhow::anyhow!("eframe failed: {e}"))?;

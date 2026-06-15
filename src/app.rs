@@ -2,7 +2,7 @@ use pc_sink::ble::DrainEvent;
 use tokio::sync::broadcast::Receiver;
 
 pub struct App {
-    r: Receiver<DrainEvent>
+    r: Receiver<DrainEvent>,
 }
 
 impl App {

@@ -25,7 +25,7 @@ pub const HYFIND_CMD_TIME: u8 = 0;
 /// handler accepts only this exact length.
 pub const SET_TIME_LEN: usize = 9;
 
-/// Downlink commands pc_sink can send to a tag's COMMAND characteristic.
+/// Downlink commands `pc_sink` can send to a tag's COMMAND characteristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownlinkCommand {
     /// Set the tag's wall-clock time, in epoch milliseconds.

@@ -1,4 +1,4 @@
-//! Local SQLite session store for decoded [`Sample`]s, with CSV export.
+//! Local `SQLite` session store for decoded [`Sample`]s, with CSV export.
 //!
 //! One database file holds one acquisition session. Every sample is tied to a
 //! stable [`TagId`] (a tag's BLE address), so data drained from a single
@@ -75,7 +75,7 @@ impl From<&str> for TagId {
 /// Errors raised by the session store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// A SQLite operation failed.
+    /// A `SQLite` operation failed.
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     /// A CSV write failed.
@@ -100,7 +100,7 @@ const CSV_HEADER: [&str; 10] = [
     "current_b",
 ];
 
-/// A handle to one session's SQLite database.
+/// A handle to one session's `SQLite` database.
 pub struct SessionStore {
     connection: Connection,
 }
