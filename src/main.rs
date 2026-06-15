@@ -9,10 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use pc_sink::ble::{AcquireConfig, run_acquisition};
+use pc_sink::ble::{AcquireConfig, DRAIN_EVENT_CHANNEL_CAPACITY, DrainEvent, run_acquisition};
 use pc_sink::store::SessionStore;
 
 /// Default session database file created in the working directory.
@@ -36,7 +36,28 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    run_acquisition(AcquireConfig::default(), store, cancel)
+    // Drain-event seam: subscribe BEFORE running the loop so no drain is missed,
+    // then log each event at debug level. A future plotting frontend subscribes
+    // here instead of (or alongside) this logger.
+    let drain_events = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
+    let mut events = drain_events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => log::debug!(
+                    "drained tag {}: {} samples",
+                    event.tag_id,
+                    event.samples_stored
+                ),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("drain-event subscriber lagged; skipped {skipped} events");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    run_acquisition(AcquireConfig::default(), store, cancel, drain_events)
         .await
         .context("running BLE acquisition loop")?;
     Ok(())
