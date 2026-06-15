@@ -30,7 +30,7 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::models::Sample;
 
@@ -126,10 +126,40 @@ impl SessionStore {
         Self::from_connection(connection)
     }
 
+    /// Opens an existing session database at `path` for **read-only** access.
+    ///
+    /// Intended for a concurrent reader (e.g. a plotting UI) that must not
+    /// contend with the writer's connection. Opens with read-only flags and does
+    /// not create or mutate schema — the file must already exist and have been
+    /// initialised by [`open`](Self::open). Combined with WAL mode on the writer,
+    /// a reader sees committed data while the writer has an open transaction.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Database`] if the file cannot be opened read-only
+    /// (e.g. it does not exist).
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        // Mirror the writer's foreign-key enforcement for consistent query
+        // semantics; this is a connection-level setting, not a schema mutation,
+        // so it is valid on a read-only connection. Crucially we do NOT run the
+        // CREATE TABLE batch: a read-only connection cannot create schema, and
+        // the file is already initialised by `open`.
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(Self { connection })
+    }
+
     /// Initialises schema and pragmas on a freshly opened connection.
     fn from_connection(connection: Connection) -> Result<Self, StoreError> {
         // Enforce the samples -> tags foreign key (off by default in SQLite).
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        // WAL lets a separate read-only connection (open_read_only) read committed
+        // data concurrently with this writer's open transactions, instead of
+        // blocking on them. On an in-memory database this silently falls back to
+        // the "memory" journal, so open_in_memory is unaffected.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS tags (
                  tag_id TEXT PRIMARY KEY,
@@ -213,17 +243,38 @@ impl SessionStore {
 
     /// Returns all samples for `tag_id`, ordered by ascending timestamp.
     ///
+    /// Equivalent to [`samples_since`](Self::samples_since) with no lower bound;
+    /// it delegates there to keep the projection and ordering in one place.
+    ///
     /// # Errors
     /// Returns [`StoreError::Database`] if the query fails.
     pub fn samples_for(&self, tag_id: &TagId) -> Result<Vec<Sample>, StoreError> {
+        // i64::MIN is at or below any real timestamp, so every row passes the
+        // `timestamp_ms >= ?2` filter — same result set as an unbounded query.
+        self.samples_since(tag_id, i64::MIN)
+    }
+
+    /// Returns `tag_id`'s samples at or after `since_ms`, ordered by ascending
+    /// timestamp.
+    ///
+    /// `since_ms` is an absolute wall-clock epoch-millisecond cutoff in the same
+    /// time base as [`Sample::timestamp_ms`]; callers that want "the last N
+    /// minutes" compute `now - N*60_000` themselves (this method reads no clock,
+    /// keeping the store pure and deterministically testable — CLAUDE.md
+    /// "separate I/O from logic"). A `since_ms` at or below the oldest sample
+    /// returns the full history; one past the newest returns an empty vec.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Database`] if the query fails.
+    pub fn samples_since(&self, tag_id: &TagId, since_ms: i64) -> Result<Vec<Sample>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT timestamp_ms, temperature_c, humidity_pct,
                     adc1_mv, adc2_mv, stim_a_mv, stim_b_mv, current_a, current_b
              FROM samples
-             WHERE tag_id = ?1
+             WHERE tag_id = ?1 AND timestamp_ms >= ?2
              ORDER BY timestamp_ms ASC, id ASC",
         )?;
-        let rows = statement.query_map((tag_id.as_str(),), |row| {
+        let rows = statement.query_map((tag_id.as_str(), since_ms), |row| {
             Ok(Sample {
                 timestamp_ms: row.get(0)?,
                 temperature_c: row.get(1)?,
@@ -397,6 +448,115 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].starts_with("tag_id,timestamp_ms,"));
         assert!(lines[1].starts_with("AA:BB:CC:DD:EE:FF,100,"));
+
+        std::fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
+
+    #[test]
+    fn samples_since_returns_only_at_or_after_cutoff_in_order() {
+        let store = SessionStore::open_in_memory().expect("open in-memory db");
+        let tag = TagId::new("AA:BB:CC:DD:EE:FF");
+        // Insert out of order to prove the ordering comes from the query.
+        store
+            .insert_samples(&tag, &[sample_at(300), sample_at(100), sample_at(200)])
+            .expect("insert");
+
+        let since = store.samples_since(&tag, 200).expect("samples since 200");
+        let timestamps: Vec<i64> = since.iter().map(|s| s.timestamp_ms).collect();
+        assert_eq!(timestamps, [200, 300]);
+    }
+
+    #[test]
+    fn samples_since_below_oldest_returns_all_above_newest_returns_empty() {
+        let store = SessionStore::open_in_memory().expect("open in-memory db");
+        let tag = TagId::new("AA:BB:CC:DD:EE:FF");
+        store
+            .insert_samples(&tag, &[sample_at(100), sample_at(200), sample_at(300)])
+            .expect("insert");
+
+        // A cutoff at or below the oldest sample yields the full history.
+        assert_eq!(store.samples_since(&tag, 0).expect("all").len(), 3);
+        // A cutoff past the newest sample yields nothing.
+        assert!(store.samples_since(&tag, 301).expect("none").is_empty());
+    }
+
+    #[test]
+    fn samples_since_isolates_by_tag() {
+        let store = SessionStore::open_in_memory().expect("open in-memory db");
+        let tag_a = TagId::new("AA:AA:AA:AA:AA:AA");
+        let tag_b = TagId::new("BB:BB:BB:BB:BB:BB");
+        store
+            .insert_samples(&tag_a, &[sample_at(100), sample_at(200)])
+            .expect("a");
+        store
+            .insert_samples(&tag_b, &[sample_at(150), sample_at(250)])
+            .expect("b");
+
+        // A cutoff that admits rows from both tags must still return only the
+        // queried tag's rows.
+        let a = store.samples_since(&tag_a, 100).expect("a since");
+        let b = store.samples_since(&tag_b, 100).expect("b since");
+        assert_eq!(
+            a.iter().map(|s| s.timestamp_ms).collect::<Vec<_>>(),
+            [100, 200]
+        );
+        assert_eq!(
+            b.iter().map(|s| s.timestamp_ms).collect::<Vec<_>>(),
+            [150, 250]
+        );
+    }
+
+    #[test]
+    fn samples_since_includes_sample_exactly_at_cutoff() {
+        let store = SessionStore::open_in_memory().expect("open in-memory db");
+        let tag = TagId::new("AA:BB:CC:DD:EE:FF");
+        store
+            .insert_samples(&tag, &[sample_at(100), sample_at(200)])
+            .expect("insert");
+
+        // `>=`, not `>`: a sample exactly at the cutoff is included.
+        let at = store.samples_since(&tag, 200).expect("at cutoff");
+        assert_eq!(at.iter().map(|s| s.timestamp_ms).collect::<Vec<_>>(), [200]);
+    }
+
+    #[test]
+    fn open_read_only_reads_back_samples_written_by_writer() {
+        let dir = std::env::temp_dir().join(format!("pc_sink_ro_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("session.sqlite");
+        let tag = TagId::new("AA:BB:CC:DD:EE:FF");
+
+        {
+            let writer = SessionStore::open(&path).expect("open writer");
+            writer
+                .insert_samples(&tag, &[sample_at(100), sample_at(200)])
+                .expect("insert");
+        }
+
+        let reader = SessionStore::open_read_only(&path).expect("open read-only");
+        let rows = reader.samples_since(&tag, 0).expect("read back");
+        assert_eq!(
+            rows.iter().map(|s| s.timestamp_ms).collect::<Vec<_>>(),
+            [100, 200]
+        );
+
+        std::fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
+
+    #[test]
+    fn open_read_only_cannot_write() {
+        let dir = std::env::temp_dir().join(format!("pc_sink_ro_ro_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("session.sqlite");
+        let tag = TagId::new("AA:BB:CC:DD:EE:FF");
+
+        // Initialise the file with the writer so the schema exists.
+        SessionStore::open(&path).expect("init writer");
+
+        let reader = SessionStore::open_read_only(&path).expect("open read-only");
+        // Inserting through a read-only handle must fail, not silently succeed.
+        let result = reader.insert_samples(&tag, &[sample_at(100)]);
+        assert!(result.is_err());
 
         std::fs::remove_dir_all(&dir).expect("clean temp dir");
     }
