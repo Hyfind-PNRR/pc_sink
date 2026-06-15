@@ -87,12 +87,16 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
+    // Read-only handle for the UI — independent of the writer behind the mutex.
+    let ui_store = SessionStore::open_read_only(Path::new(SESSION_DB_PATH))
+        .with_context(|| format!("opening read-only store at {SESSION_DB_PATH}"))?;
+
     // eframe owns the main thread and blocks here until the window closes.
-    // The App holds `ui_events` and (per shape B) a read-only DB path.
+    // The App holds `ui_events` and (per shape B) its own read-only store.
     let gui_result = eframe::run_native(
         "Pc_sink",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(app::App::new(ui_events)))),
+        Box::new(move |_cc| Ok(Box::new(app::App::new(ui_events, ui_store)))),
     );
 
     // Window closed → tell acquisition to stop, then wait for it to finish.
