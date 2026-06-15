@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use btleplug::api::{Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::StreamExt;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -93,6 +93,47 @@ impl Default for AcquireConfig {
 /// serialize their inserts behind this async mutex. Inserts are brief and never
 /// hold the guard across an `.await`.
 pub type SharedStore = Arc<Mutex<SessionStore>>;
+
+/// Published once each time a tag is successfully drained.
+///
+/// Subscribers use this as the signal to re-query the store for `tag_id`
+/// (e.g. a plotting frontend refreshing that tag's series). It is deliberately
+/// small and `Clone` so it can fan out over a broadcast channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainEvent {
+    /// The tag whose buffered data was just drained into the store.
+    pub tag_id: TagId,
+    /// Number of samples stored during this drain cycle.
+    pub samples_stored: usize,
+}
+
+/// Capacity of the drain-event broadcast channel.
+///
+/// `broadcast` drops the oldest queued event for a slow subscriber (surfaced as
+/// `RecvError::Lagged`) rather than applying backpressure — acquisition must
+/// never stall waiting on a subscriber. Sized to comfortably buffer a burst of
+/// drains across the ~15-20 tag session (CLAUDE.md A.1).
+pub const DRAIN_EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// Publishes a [`DrainEvent`] for a completed drain, ignoring no-subscriber errors.
+///
+/// A [`broadcast::error::SendError`] means there are currently zero subscribers,
+/// which is expected (e.g. the binary drops its receiver) and never a failure —
+/// acquisition must not stall or fault because nobody is listening. Factored out
+/// of the BLE-bound [`service_tag`] so the publish behaviour is unit-testable
+/// without any transport.
+fn publish_drain(
+    drain_events: &broadcast::Sender<DrainEvent>,
+    tag_id: &TagId,
+    samples_stored: usize,
+) {
+    // `tag_id` is cloned because the event owns it and the caller keeps using
+    // its `tag_id` after the send; the clone is a single small newtype.
+    let _ = drain_events.send(DrainEvent {
+        tag_id: tag_id.clone(),
+        samples_stored,
+    });
+}
 
 /// Errors raised while running the acquisition loop.
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +207,11 @@ pub fn decode_and_store(
 /// keyed by the tag's BLE address. Per-tag failures are logged and isolated; the
 /// loop returns `Ok(())` once `cancel` fires.
 ///
+/// Every successful drain publishes a [`DrainEvent`] on `drain_events`; the
+/// caller is expected to `subscribe()` **before** awaiting this future so it sees
+/// every drain. A send with no live subscribers is not an error (CLAUDE.md A.1
+/// observability seam).
+///
 /// # Errors
 /// Returns [`AcquireError`] only for failures that prevent the loop from running
 /// at all (no adapter, scanning cannot start). Per-tag errors do not propagate.
@@ -173,6 +219,7 @@ pub async fn run_acquisition(
     config: AcquireConfig,
     store: SharedStore,
     cancel: CancellationToken,
+    drain_events: broadcast::Sender<DrainEvent>,
 ) -> Result<(), AcquireError> {
     let manager = Manager::new().await?;
     let adapter = manager
@@ -213,7 +260,16 @@ pub async fn run_acquisition(
             _ => continue,
         };
 
-        maybe_service_tag(&adapter, id, &config, &store, &semaphore, &in_progress).await;
+        maybe_service_tag(
+            &adapter,
+            id,
+            &config,
+            &store,
+            &semaphore,
+            &in_progress,
+            &drain_events,
+        )
+        .await;
     }
 
     // Best-effort: stopping the scan should not mask a clean shutdown.
@@ -234,6 +290,7 @@ async fn maybe_service_tag(
     store: &SharedStore,
     semaphore: &Arc<Semaphore>,
     in_progress: &Arc<Mutex<HashSet<PeripheralId>>>,
+    drain_events: &broadcast::Sender<DrainEvent>,
 ) {
     let Some(name) = advertised_name(adapter, &id).await else {
         return;
@@ -261,9 +318,13 @@ async fn maybe_service_tag(
     let config = Arc::clone(config);
     let store = Arc::clone(store);
     let in_progress = Arc::clone(in_progress);
+    // `broadcast::Sender` is cheaply clonable (shared internally) and the task
+    // outlives this scope, so it needs its own handle to publish drain events.
+    let drain_events = drain_events.clone();
     tokio::spawn(async move {
         let _permit = permit; // Released (slot freed) when the task ends.
-        if let Err(error) = service_tag(&adapter, &id, &name, &config, &store).await {
+        if let Err(error) = service_tag(&adapter, &id, &name, &config, &store, &drain_events).await
+        {
             log::warn!("tag {name} ({id:?}) service error: {error}");
         }
         in_progress.lock().await.remove(&id);
@@ -287,6 +348,7 @@ async fn service_tag(
     name: &str,
     config: &AcquireConfig,
     store: &SharedStore,
+    drain_events: &broadcast::Sender<DrainEvent>,
 ) -> Result<(), AcquireError> {
     let peripheral = adapter.peripheral(id).await?;
     let tag_id = TagId::new(peripheral.address().to_string());
@@ -298,17 +360,24 @@ async fn service_tag(
     if let Err(error) = peripheral.disconnect().await {
         log::warn!("tag {name} disconnect error: {error}");
     }
-    result
+    // Publish only on a successful drain, so a subscriber never re-queries the
+    // store for a tag whose drain faulted partway through.
+    let samples_stored = result?;
+    publish_drain(drain_events, &tag_id, samples_stored);
+    Ok(())
 }
 
 /// Time-syncs a connected tag, then stores every packet it indicates.
+///
+/// Returns the number of samples stored across this drain — the source of truth
+/// for the [`DrainEvent`] published by [`service_tag`].
 async fn drain_tag(
     peripheral: &Peripheral,
     tag_id: &TagId,
     name: &str,
     config: &AcquireConfig,
     store: &SharedStore,
-) -> Result<(), AcquireError> {
+) -> Result<usize, AcquireError> {
     peripheral.discover_services().await?;
     let characteristics = peripheral.characteristics();
     let command = characteristics
@@ -363,7 +432,7 @@ async fn drain_tag(
     }
 
     log::info!("tag {name}: drained {stored} samples");
-    Ok(())
+    Ok(stored)
 }
 
 #[cfg(test)]
@@ -448,6 +517,82 @@ mod tests {
         assert_eq!(config.name_prefix, TAG_NAME_PREFIX);
         assert_eq!(config.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert_eq!(config.drain_idle_timeout, DEFAULT_DRAIN_IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn drain_event_is_clone_and_eq() {
+        let event = DrainEvent {
+            tag_id: TagId::new("AA:BB:CC:DD:EE:FF"),
+            samples_stored: SAMPLES_PER_PACKET,
+        };
+        // Clone yields an equal value, confirming `Clone`/`PartialEq` for fan-out.
+        let clone = event.clone();
+        assert_eq!(event, clone);
+        assert_eq!(clone.tag_id, TagId::new("AA:BB:CC:DD:EE:FF"));
+        assert_eq!(clone.samples_stored, SAMPLES_PER_PACKET);
+    }
+
+    #[test]
+    fn publish_drain_delivers_one_event_to_a_subscriber() {
+        let tx = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
+        let mut rx = tx.subscribe();
+        let tag = TagId::new("11:22:33:44:55:66");
+
+        publish_drain(&tx, &tag, 30);
+
+        let event = rx.try_recv().expect("one event published");
+        assert_eq!(
+            event,
+            DrainEvent {
+                tag_id: tag,
+                samples_stored: 30,
+            }
+        );
+        // Exactly one event — nothing else is queued.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn publish_drain_with_zero_samples_still_sends_one_event() {
+        // The success path may legitimately store zero samples (an empty drain);
+        // the event still fires so subscribers learn the tag was serviced.
+        let tx = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
+        let mut rx = tx.subscribe();
+        let tag = TagId::new("11:22:33:44:55:66");
+
+        publish_drain(&tx, &tag, 0);
+
+        let event = rx.try_recv().expect("one event published");
+        assert_eq!(event.samples_stored, 0);
+        assert_eq!(event.tag_id, tag);
+    }
+
+    #[test]
+    fn publish_drain_without_subscribers_does_not_error() {
+        // Mirrors the live path where the binary may have dropped its receiver:
+        // a send with zero subscribers is a no-op, not a failure.
+        let tx = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
+        let tag = TagId::new("11:22:33:44:55:66");
+
+        // No panic / no error surfaced — the `let _ =` swallows `SendError`.
+        publish_drain(&tx, &tag, 10);
+    }
+
+    #[test]
+    fn no_event_is_published_when_publish_is_not_called() {
+        // Models the error path: `service_tag` returns before `publish_drain`, so
+        // a subscriber sees nothing.
+        let tx = broadcast::Sender::<DrainEvent>::new(DRAIN_EVENT_CHANNEL_CAPACITY);
+        let mut rx = tx.subscribe();
+
+        // No publish_drain call — the receiver is empty.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
