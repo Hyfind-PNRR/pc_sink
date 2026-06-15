@@ -1,6 +1,15 @@
-#[derive(Default)]
-pub struct App {}
+use pc_sink::ble::DrainEvent;
+use tokio::sync::broadcast::Receiver;
 
+pub struct App {
+    r: Receiver<DrainEvent>
+}
+
+impl App {
+    pub fn new(r: Receiver<DrainEvent>) -> Self {
+        Self { r }
+    }
+}
 
 impl eframe::App for App {
     /// Called each time the UI needs repainting, which may be many times per second.
